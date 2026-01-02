@@ -206,7 +206,7 @@ def default_chat_cfg() -> Dict[str, Any]:
         "maxPriorityFee": 0.01,          # SOL cap for auto modes
         "jitoTip": None,                 # optional float
         "guaranteedDelivery": True,
-        "maxBuySol": 10,                # per-click limit
+        "maxBuySol": 0.2,                # per-click limit
 
         # wallet
         "enc_privateKey": None,
@@ -316,7 +316,7 @@ def trade_menu_kb(cfg: Dict[str, Any]) -> Dict[str, Any]:
         [(f"Slippage: {slip}%", "trade:slippage")],
         [(f"priorityFee: {pf}", "trade:priorityfee")],
         [(f"guaranteedDelivery: {'ON' if gd else 'OFF'}", "trade:toggle_gd")],
-        [(f"maxBuySol: {cfg.get('maxBuySol', 10)}", "trade:maxbuy")],
+        [(f"maxBuySol: {cfg.get('maxBuySol', 0.2)}", "trade:maxbuy")],
         [("⬅️ Назад", "back:main")],
     ])
 
@@ -378,7 +378,7 @@ def render_status(cfg: Dict[str, Any]) -> str:
     lines.append(f"• priorityFee: {cfg.get('priorityFee', 'auto-75')}")
     lines.append(f"• maxPriorityFee: {cfg.get('maxPriorityFee', 0.01)} SOL")
     lines.append(f"• guaranteedDelivery: {'true' if cfg.get('guaranteedDelivery', True) else 'false'}")
-    lines.append(f"• maxBuySol: {cfg.get('maxBuySol', 10)} SOL")
+    lines.append(f"• maxBuySol: {cfg.get('maxBuySol', 0.2)} SOL")
     return "\n".join(lines)
 
 
@@ -742,7 +742,7 @@ async def telegram_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSessio
                             await tg.send_message(chat_id, "Введи сумму SOL числом, например 0.05")
                             continue
 
-                        max_buy = float(cfg.get("maxBuySol", 10))
+                        max_buy = float(cfg.get("maxBuySol", 0.2))
                         if amt > max_buy:
                             await tg.send_message(chat_id, f"Слишком много. maxBuySol={max_buy} SOL")
                             continue
@@ -922,7 +922,7 @@ async def telegram_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSessio
 
                     if data == "trade:maxbuy":
                         app.chat_states[key] = {"mode": "await_maxbuy"}
-                        await tg.edit_message_text(chat_id, message_id, "Введи maxBuySol числом (например 10)")
+                        await tg.edit_message_text(chat_id, message_id, "Введи maxBuySol числом (например 0.2)")
                         continue
 
                     # wallet
@@ -951,7 +951,7 @@ async def telegram_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSessio
                             await tg.send_message(chat_id, "Сначала подключи кошелёк: /start → Кошелёк")
                             continue
                         app.chat_states[key] = {"mode": "await_buy_amount", "mint": mint}
-                        await tg.send_message(chat_id, f"Введи сумму покупки в SOL (maxBuySol={cfg.get('maxBuySol', 10)}):")
+                        await tg.send_message(chat_id, f"Введи сумму покупки в SOL (maxBuySol={cfg.get('maxBuySol', 0.2)}):")
                         continue
 
                     if data.startswith("ord:buyq:"):
@@ -963,7 +963,7 @@ async def telegram_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSessio
                             await tg.send_message(chat_id, "Сначала подключи кошелёк: /start → Кошелёк")
                             continue
 
-                        max_buy = float(cfg.get("maxBuySol", 10))
+                        max_buy = float(cfg.get("maxBuySol", 0.2))
                         if amt > max_buy:
                             await tg.send_message(chat_id, f"Слишком много. maxBuySol={max_buy} SOL")
                             continue
