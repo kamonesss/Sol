@@ -1,11 +1,3 @@
-# bot.py
-# Telegram bot + PumpAPI stream alerts + trading via PumpAPI (Lightning)
-# - user sets filters & trade params via Telegram buttons
-# - user sends private key in Telegram -> we encrypt & store locally
-# - bot shows wallet address (public key)
-# - alert messages include Buy/Sell buttons
-# - after trade, shows Solscan link https://solscan.io/tx/<signature>
-
 import asyncio
 import json as stdjson
 import os
@@ -48,6 +40,7 @@ TRADE_URL = os.getenv("PUMPAPI_TRADE_URL", "https://api.pumpapi.io").strip()
 
 SOL_PRICE_USD = float(os.getenv("SOL_PRICE_USD", "126"))
 DEFAULT_MC_THRESHOLD_USD = float(os.getenv("MC_THRESHOLD_USD", "10000"))
+DEFAULT_ANOMALY_MIN_SOL = float(os.getenv("ANOMALY_MIN_SOL", "50"))
 
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
 TG_LONGPOLL_TIMEOUT = int(os.getenv("TG_LONGPOLL_TIMEOUT", "30"))
@@ -198,6 +191,8 @@ def default_chat_cfg() -> Dict[str, Any]:
         # filters
         "mc_threshold": DEFAULT_MC_THRESHOLD_USD,
         "notify_migrate": True,
+        "notify_anomaly": True,
+        "anomaly_min_sol": DEFAULT_ANOMALY_MIN_SOL,
         "require_socials": True,
 
         # trade defaults
@@ -290,10 +285,14 @@ def start_kb() -> Dict[str, Any]:
 def filters_menu_kb(cfg: Dict[str, Any]) -> Dict[str, Any]:
     mc = float(cfg.get("mc_threshold", DEFAULT_MC_THRESHOLD_USD))
     mig = bool(cfg.get("notify_migrate", True))
+    anomaly = bool(cfg.get("notify_anomaly", True))
+    anomaly_min = float(cfg.get("anomaly_min_sol", DEFAULT_ANOMALY_MIN_SOL))
     socials = bool(cfg.get("require_socials", True))
     return kb_inline([
         [(f"Капа: {pretty_usd(mc)}", "filters:mc")],
         [(f"Миграция: {'ВКЛ' if mig else 'ВЫК'}", "filters:toggle_migrate")],
+        [(f"Аномалии ≥ {anomaly_min} SOL: {'ВКЛ' if anomaly else 'ВЫК'}", "filters:toggle_anomaly")],
+        [(f"Мин SOL для аномалии", "filters:anomaly_min")],
         [(f"Web/X/TG: {'ВКЛ' if socials else 'ВЫК'}", "filters:toggle_socials")],
         [("⬅️ Назад", "back:main")],
     ])
@@ -305,6 +304,15 @@ def mc_menu_kb() -> Dict[str, Any]:
         [("50k", "mc:set:50000"), ("100k", "mc:set:100000")],
         [("Custom", "mc:set:custom")],
         [("⬅️ Назад", "mc:back")],
+    ])
+
+
+def anomaly_min_menu_kb() -> Dict[str, Any]:
+    return kb_inline([
+        [("10", "anomaly:set:10"), ("20", "anomaly:set:20"), ("50", "anomaly:set:50")],
+        [("100", "anomaly:set:100"), ("200", "anomaly:set:200")],
+        [("Custom", "anomaly:set:custom")],
+        [("⬅️ Назад", "anomaly:back")],
     ])
 
 
@@ -371,6 +379,8 @@ def render_status(cfg: Dict[str, Any]) -> str:
     lines.append("⚙️ Фильтры:")
     lines.append(f"• Капа алерта: {pretty_usd(float(cfg.get('mc_threshold', DEFAULT_MC_THRESHOLD_USD)))}")
     lines.append(f"• Миграция: {'ВКЛ ✅' if cfg.get('notify_migrate', True) else 'ВЫК ❌'}")
+    lines.append(f"• Аномалии: {'ВКЛ ✅' if cfg.get('notify_anomaly', True) else 'ВЫК ❌'}")
+    lines.append(f"• Мин SOL для аномалии: {cfg.get('anomaly_min_sol', DEFAULT_ANOMALY_MIN_SOL)}")
     lines.append(f"• Требовать Web/X/TG: {'ВКЛ ✅' if cfg.get('require_socials', True) else 'ВЫК ❌'}")
     lines.append("")
     lines.append("💥 Трейд:")
@@ -488,6 +498,36 @@ def build_alert_message(t: TokenInfo, migrated: bool = False) -> str:
         lines += ["", "MIGRATED: ✅"]
 
     lines += [
+        "",
+        f"Web: {t.web or ''}",
+        f"X: {t.x or ''}",
+        f"TG: {t.tg or ''}",
+    ]
+    return "\n".join(lines)
+
+
+def build_anomaly_message(t: TokenInfo, amount: float, buyer: str) -> str:
+    symbol = t.symbol or (t.name if t.name else "UNKNOWN")
+    mint = t.mint
+    gmgn = f"https://gmgn.ai/sol/token/{mint}"
+
+    mc_line = ""
+    if t.last_mc_usd is not None:
+        if t.last_mc_sol is not None:
+            mc_line = f"{t.last_mc_usd:,.0f}$ (~{t.last_mc_sol:,.2f} SOL)"
+        else:
+            mc_line = f"{t.last_mc_usd:,.0f}$"
+
+    lines = [
+        "🚨 ANOMALY BUY",
+        symbol,
+        f"CA: {mint}",
+        f"GMGN: {gmgn}",
+        "",
+        f"Buy: {amount:.2f} SOL",
+        f"Wallet: {buyer}",
+        "",
+        f"MC: {mc_line}",
         "",
         f"Web: {t.web or ''}",
         f"X: {t.x or ''}",
@@ -681,6 +721,22 @@ async def telegram_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSessio
                         await tg.send_message(chat_id, "Готово ✅", reply_markup=filters_menu_kb(cfg))
                         continue
 
+                    # custom anomaly min sol
+                    if state.get("mode") == "await_anomaly_custom" and text and not text.startswith("/"):
+                        try:
+                            val = float(text.strip())
+                            if val <= 0:
+                                raise ValueError()
+                        except Exception:
+                            await tg.send_message(chat_id, "Не понял число. Пример: 50")
+                            continue
+                        cfg["anomaly_min_sol"] = float(val)
+                        app.chats_cfg[str(chat_id)] = cfg
+                        save_json_file(DATA_FILE, {"chats": app.chats_cfg})
+                        app.chat_states.pop(str(chat_id), None)
+                        await tg.send_message(chat_id, "Готово ✅", reply_markup=filters_menu_kb(cfg))
+                        continue
+
                     # custom slippage
                     if state.get("mode") == "await_slip_custom" and text and not text.startswith("/"):
                         try:
@@ -860,6 +916,33 @@ async def telegram_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSessio
 
                     if data == "filters:toggle_migrate":
                         cfg["notify_migrate"] = not bool(cfg.get("notify_migrate", True))
+                        app.chats_cfg[key] = cfg
+                        save_json_file(DATA_FILE, {"chats": app.chats_cfg})
+                        await tg.edit_message_text(chat_id, message_id, "⚙️ Фильтры:", reply_markup=filters_menu_kb(cfg))
+                        continue
+
+                    if data == "filters:toggle_anomaly":
+                        cfg["notify_anomaly"] = not bool(cfg.get("notify_anomaly", True))
+                        app.chats_cfg[key] = cfg
+                        save_json_file(DATA_FILE, {"chats": app.chats_cfg})
+                        await tg.edit_message_text(chat_id, message_id, "⚙️ Фильтры:", reply_markup=filters_menu_kb(cfg))
+                        continue
+
+                    if data == "filters:anomaly_min":
+                        await tg.edit_message_text(chat_id, message_id, "Выбери мин SOL для аномалии:", reply_markup=anomaly_min_menu_kb())
+                        continue
+
+                    if data == "anomaly:back":
+                        await tg.edit_message_text(chat_id, message_id, "⚙️ Фильтры:", reply_markup=filters_menu_kb(cfg))
+                        continue
+
+                    if data.startswith("anomaly:set:"):
+                        v = data.split("anomaly:set:", 1)[1]
+                        if v == "custom":
+                            app.chat_states[key] = {"mode": "await_anomaly_custom"}
+                            await tg.edit_message_text(chat_id, message_id, "Введи мин SOL числом. Пример: 50")
+                            continue
+                        cfg["anomaly_min_sol"] = float(v)
                         app.chats_cfg[key] = cfg
                         save_json_file(DATA_FILE, {"chats": app.chats_cfg})
                         await tg.edit_message_text(chat_id, message_id, "⚙️ Фильтры:", reply_markup=filters_menu_kb(cfg))
@@ -1163,6 +1246,25 @@ async def pump_stream_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSes
                     chat_ids = app.active_chat_ids()
                     if not chat_ids:
                         continue
+
+                    # ANOMALY BUY alert
+                    if tx_type == "buy":
+                        amount = event.get("amount") or event.get("sol_amount")
+                        if not isinstance(amount, (int, float)) or amount <= 0:
+                            continue
+                        buyer = event.get("wallet") or event.get("user") or ""
+                        for chat_id in chat_ids:
+                            cfg = app.ensure_chat(chat_id)
+                            if not bool(cfg.get("notify_anomaly", True)):
+                                continue
+                            min_sol = float(cfg.get("anomaly_min_sol", DEFAULT_ANOMALY_MIN_SOL))
+                            if amount < min_sol:
+                                continue
+                            if bool(cfg.get("require_socials", True)) and not has_any_social(t.web, t.x, t.tg):
+                                continue
+
+                            await tg.send_message(chat_id, build_anomaly_message(t, amount, buyer), reply_markup=alert_trade_kb(mint))
+                            print(f"[ALERT] ANOMALY {mint} {amount} SOL -> chat {chat_id}")
 
                     # MC alert
                     if tx_type != "migrate" and t.last_mc_usd is not None:
