@@ -1249,10 +1249,10 @@ async def pump_stream_loop(app: App, tg: TelegramAPI, session: aiohttp.ClientSes
 
                     # ANOMALY BUY alert
                     if tx_type == "buy":
-                        amount = event.get("amount") or event.get("sol_amount")
+                        amount = event.get("solAmount")
                         if not isinstance(amount, (int, float)) or amount <= 0:
                             continue
-                        buyer = event.get("wallet") or event.get("user") or ""
+                        buyer = event.get("user") or ""
                         for chat_id in chat_ids:
                             cfg = app.ensure_chat(chat_id)
                             if not bool(cfg.get("notify_anomaly", True)):
